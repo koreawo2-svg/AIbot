@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 실제 인증정보/설정 (절대 커밋 금지)
+config.yaml
+.env
+*.key
+secrets.*
+
+# 로그
+*.log
+logs/

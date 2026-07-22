@@ -1,0 +1,44 @@
+# AIbot 자동매매 설정 예시
+# 복사해서 config.yaml 로 저장한 뒤 값을 수정하세요.
+#   cp config.example.yaml config.yaml
+
+# 사용할 브로커: 현재 실행 가능한 값은 paper(모의) 뿐입니다.
+# nh / meritz / shinhan 은 API 키 확보 후 어댑터를 구현하면 사용 가능.
+broker: paper
+
+# 모의 시작 현금
+cash: 10000000
+
+# 주문 유형: MARKET(시장가) 또는 LIMIT(지정가)
+order_type: MARKET
+
+# 데모/모의 반복 횟수(틱 수)
+steps: 300
+
+# 실계좌 연동 시 필요한 인증정보 (환경변수 사용 권장, 절대 커밋 금지)
+credentials:
+  app_key: ""
+  app_secret: ""
+  account_no: ""
+
+# 종목별 매매 규칙
+rules:
+  - symbol: "005930"          # 삼성전자
+    target_buy_price: 70000   # 이 가격 이하면 매수 후보
+    order_quantity: 10        # 1회 매수 수량
+    take_profit_pct: 3.0      # +3% 익절
+    stop_loss_pct: 2.0        # -2% 손절
+    sma_period: 20
+    rsi_period: 14
+    rsi_oversold: 30
+    rsi_overbought: 70
+    use_sma_cross: true
+    use_rsi: true
+    buy_logic: "OR"           # 가격조건 OR 지표조건이면 매수
+
+  - symbol: "000660"          # SK하이닉스
+    target_buy_price: 120000
+    order_quantity: 5
+    take_profit_pct: 4.0
+    stop_loss_pct: 2.5
+    buy_logic: "AND"          # 가격조건 AND 지표조건이어야 매수
