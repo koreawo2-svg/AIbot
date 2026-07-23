@@ -57,6 +57,10 @@ class PaperBroker(BrokerAdapter):
     def get_position(self, symbol: str) -> Position | None:
         return self._account.positions.get(symbol)
 
+    def equity(self) -> float:
+        """현금 + 보유종목 평가금액(가장 최근 시세 기준)."""
+        return self._account.equity(self._last_quotes)
+
     # --- 주문 ---
     def place_order(self, order: Order) -> Order:
         quote = self._last_quotes.get(order.symbol)

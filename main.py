@@ -87,16 +87,36 @@ def _print_summary(engine: TradingEngine, broker: PaperBroker) -> None:
         print(f"보유 {sym}: {pos.quantity}주 @ 평단 {pos.avg_price:,.0f}")
 
 
+def run_report(path: str, steps: int) -> None:
+    """데모 구성으로 백테스트를 돌리고 HTML 리포트를 생성."""
+    from autotrader.backtest import Backtester
+    from autotrader.report import write_report
+
+    engine, broker = build_demo()
+    result = Backtester(engine, broker).run(steps)
+    write_report(result, path)
+    print(
+        f"리포트 생성: {path}\n"
+        f"  총 수익률 {result.total_return_pct:+.2f}% | "
+        f"승률 {result.win_rate_pct:.0f}% | "
+        f"MDD -{result.max_drawdown_pct:.2f}% | "
+        f"체결 {len(result.trades)}건"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AIbot 자동 주식 매매(모의)")
     parser.add_argument("--config", help="설정 YAML 경로")
     parser.add_argument("--demo", action="store_true", help="내장 데모 실행")
     parser.add_argument("--steps", type=int, default=200, help="데모 반복 횟수")
+    parser.add_argument("--report", metavar="OUT.html", help="백테스트 HTML 리포트 생성 경로")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.config:
+    if args.report:
+        run_report(args.report, args.steps)
+    elif args.config:
         run_from_config(args.config)
     else:
         # 기본은 데모
