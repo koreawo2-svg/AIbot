@@ -158,6 +158,67 @@ def run_csv(
         print(f"리포트 생성: {report_path}")
 
 
+def _parse_grid(spec: str) -> list[float]:
+    """'2,3,4' -> [2.0, 3.0, 4.0]."""
+    return [float(x) for x in spec.split(",") if x.strip() != ""]
+
+
+def run_optimize(
+    specs: list[str] | None,
+    tp_grid: str,
+    sl_grid: str,
+    ts_grid: str,
+    objective: str,
+    target: float | None,
+    qty: int,
+    cash: float,
+) -> None:
+    """익절/손절/트레일링스톱 그리드를 자동 탐색해 최적 조합을 출력."""
+    import os
+
+    from autotrader.data_loader import load_close_series
+    from autotrader.optimizer import optimize
+
+    if specs:
+        price_map: dict[str, list[float]] = {}
+        for spec in specs:
+            symbol, path = spec.split("=", 1)
+            _, closes = load_close_series(path.strip())
+            price_map[symbol.strip()] = closes
+    else:
+        sample = os.path.join(os.path.dirname(__file__), "data", "sample_005930.csv")
+        _, closes = load_close_series(sample)
+        price_map = {"005930": closes}
+
+    base_params: dict = {"qty": qty, "cash": cash}
+    if target is not None:
+        base_params["target"] = target
+        base_params["buy_logic"] = "OR"
+
+    # 그리드 키는 service.build_rule 이 읽는 파라미터명(tp/sl/trailing_stop_pct)과 일치해야 함
+    grid = {
+        "tp": _parse_grid(tp_grid),
+        "sl": _parse_grid(sl_grid),
+        "trailing_stop_pct": _parse_grid(ts_grid),
+    }
+    out = optimize(price_map, base_params, grid, objective=objective, top=10)
+
+    print(f"\n최적화 결과 (목표={out['objective']}, 평가 {out['evaluated']}개 조합)")
+    if out["capped"]:
+        print("  ※ 조합이 많아 상한까지만 평가했습니다.")
+    print(f"{'순위':>3} {'익절%':>6} {'손절%':>6} {'트레일%':>7} {'수익률':>8} {'승률':>6} {'MDD':>7} {'체결':>5}")
+    for i, r in enumerate(out["results"], 1):
+        p, s = r["params"], r["stats"]
+        print(
+            f"{i:>3} {p['tp']:>6.1f} {p['sl']:>6.1f} "
+            f"{p['trailing_stop_pct']:>7.1f} {s['total_return_pct']:>7.2f}% "
+            f"{s['win_rate_pct']:>5.0f}% {s['max_drawdown_pct']:>6.2f}% {s['num_trades']:>5}"
+        )
+    if out["results"]:
+        best = out["results"][0]
+        print(f"\n▶ 추천 조합: {best['params']} → 수익률 {best['stats']['total_return_pct']:+.2f}%")
+
+
 def run_report(path: str, steps: int) -> None:
     """데모 구성으로 백테스트를 돌리고 HTML 리포트를 생성."""
     from autotrader.backtest import Backtester
@@ -188,11 +249,20 @@ def main() -> None:
     parser.add_argument("--sl", type=float, default=3.0, help="손절 %% (기본 3)")
     parser.add_argument("--qty", type=int, default=10, help="1회 주문 수량(기본 10)")
     parser.add_argument("--cash", type=float, default=10_000_000, help="시작 현금")
+    parser.add_argument("--optimize", action="store_true", help="익절/손절/트레일링 그리드 자동 최적화")
+    parser.add_argument("--tp-grid", default="2,3,4,5", help="익절 후보(콤마): 예 2,3,4,5")
+    parser.add_argument("--sl-grid", default="1,2,3", help="손절 후보(콤마)")
+    parser.add_argument("--ts-grid", default="0,3,5", help="트레일링스톱 후보(콤마, 0=미사용)")
+    parser.add_argument("--objective", default="return",
+                        choices=["return", "return_dd", "winrate"], help="최적화 목표")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.csv:
+    if args.optimize:
+        run_optimize(args.csv, args.tp_grid, args.sl_grid, args.ts_grid,
+                     args.objective, args.target, args.qty, args.cash)
+    elif args.csv:
         run_csv(args.csv, args.report, args.target, args.tp, args.sl, args.qty, args.cash)
     elif args.report:
         run_report(args.report, args.steps)

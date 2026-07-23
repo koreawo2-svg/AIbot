@@ -65,7 +65,12 @@ python main.py --csv 005930=data/sample_005930.csv --tp 4 --sl 2 --report result
 #    여러 종목 동시
 python main.py --csv 005930=samsung.csv --csv 000660=hynix.csv --report result.html
 
-# 5) 웹 대시보드 (브라우저에서 클릭으로 조작)
+# 5) 파라미터 자동 최적화 (익절/손절/트레일링 조합 자동 탐색)
+python main.py --optimize --tp-grid 2,3,4,5 --sl-grid 1,2,3 --ts-grid 0,3,5 --target 70000 --qty 100
+#   실제 CSV로: --csv 005930=samsung.csv 추가
+#   목표 지표: --objective return | return_dd(위험조정) | winrate
+
+# 6) 웹 대시보드 (브라우저에서 클릭으로 조작)
 python -m autotrader.webapp        # http://127.0.0.1:8000 접속
 #   → 데이터소스/목표가/익절·손절/트레일링스톱을 화면에서 조절하고
 #     '백테스트 실행'을 누르면 수익곡선·통계·매매내역이 즉시 표시됩니다.
@@ -85,6 +90,7 @@ python -m autotrader.webapp --port 8000
 - **데이터 소스**: 샘플(005930) · CSV 업로드 · 랜덤워크 데모
 - **화면에서 조절**: 진입방식(지정가/지표), 목표가, 익절%, 손절%, 수량, 트레일링스톱%, 데드크로스 매도, 시작현금
 - 실행 즉시 **수익곡선 + 통계카드(수익률/승률/MDD) + 매매내역**을 시각화
+- **파라미터 자동 최적화**: 익절/손절/트레일링 후보를 넣고 '최적화 실행' → 성과순 순위표, 행 클릭 시 그 조합이 바로 적용·재실행
 - 파이썬 표준 라이브러리만 사용 → `pip install` 없이 바로 실행
 
 ## 전략 강화 옵션

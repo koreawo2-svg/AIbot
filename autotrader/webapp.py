@@ -71,22 +71,46 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
-        if self.path != "/api/backtest":
-            self._send(404, b"not found", "text/plain; charset=utf-8")
-            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             payload = json.loads(self.rfile.read(length) or b"{}")
-            symbol, closes = _load_series(payload)
-            result = run_backtest({symbol: closes}, payload.get("params", {}))
-            data = result_to_dict(result)
-            data["symbol"] = symbol
-            data["points"] = len(closes)
+            if self.path == "/api/backtest":
+                data = self._backtest(payload)
+            elif self.path == "/api/optimize":
+                data = self._optimize(payload)
+            else:
+                self._send(404, b"not found", "text/plain; charset=utf-8")
+                return
             body = json.dumps({"ok": True, **data}).encode("utf-8")
             self._send(200, body, "application/json; charset=utf-8")
         except Exception as exc:  # 사용자에게 오류 메시지 전달
             body = json.dumps({"ok": False, "error": str(exc)}).encode("utf-8")
             self._send(400, body, "application/json; charset=utf-8")
+
+    def _backtest(self, payload: dict) -> dict:
+        symbol, closes = _load_series(payload)
+        result = run_backtest({symbol: closes}, payload.get("params", {}))
+        data = result_to_dict(result)
+        data["symbol"] = symbol
+        data["points"] = len(closes)
+        return data
+
+    def _optimize(self, payload: dict) -> dict:
+        from autotrader.optimizer import optimize
+
+        symbol, closes = _load_series(payload)
+        grid = payload.get("grid", {})
+        # 문자열/숫자 혼용 방어: 값 리스트를 float로 정규화
+        norm_grid = {k: [float(v) for v in vals] for k, vals in grid.items() if vals}
+        out = optimize(
+            {symbol: closes},
+            payload.get("params", {}),
+            norm_grid,
+            objective=payload.get("objective", "return"),
+            top=int(payload.get("top", 15)),
+        )
+        out["symbol"] = symbol
+        return out
 
 
 def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
@@ -205,6 +229,18 @@ INDEX_HTML = r"""<!doctype html>
       <div class="check"><input type="checkbox" id="deadcross"/><label for="deadcross" style="margin:0">데드크로스 매도 사용</label></div>
 
       <button id="run">백테스트 실행 ▶</button>
+
+      <h2 style="margin-top:22px">파라미터 자동 최적화</h2>
+      <label>익절% 후보 (콤마)</label><input id="tpGrid" value="2,3,4,5"/>
+      <label>손절% 후보 (콤마)</label><input id="slGrid" value="1,2,3"/>
+      <label>트레일링% 후보 (콤마, 0=미사용)</label><input id="tsGrid" value="0,3,5"/>
+      <label>최적화 목표</label>
+      <select id="objective">
+        <option value="return">총 수익률</option>
+        <option value="return_dd">위험조정수익(수익률/낙폭)</option>
+        <option value="winrate">승률</option>
+      </select>
+      <button id="opt" style="background:#7c3aed">최적화 실행 ⚙</button>
       <div id="err" class="err"></div>
     </div>
 
@@ -214,6 +250,10 @@ INDEX_HTML = r"""<!doctype html>
       <div class="panel" style="margin-bottom:16px">
         <h2>평가금액 곡선</h2>
         <div id="chart" style="color:var(--muted)"><p class="muted">실행하면 결과가 표시됩니다.</p></div>
+      </div>
+      <div id="optPanel" class="panel hidden" style="margin-bottom:16px">
+        <h2>최적화 결과 (행 클릭 시 해당 조합 적용)</h2>
+        <div class="tablewrap"><table id="optTable"></table></div>
       </div>
       <div class="panel">
         <h2>매매 내역</h2>
@@ -286,29 +326,77 @@ function renderTrades(trades){
   $('trades').innerHTML=head+'<tbody>'+rows+'</tbody>';
 }
 
+function buildParams(){
+  const params={
+    tp:parseFloat($('tp').value), sl:parseFloat($('sl').value),
+    qty:parseInt($('qty').value), cash:parseFloat($('cash').value),
+    trailing_stop_pct:parseFloat($('ts').value),
+    use_sma_cross_exit:$('deadcross').checked,
+  };
+  if($('entry').value==='target'){ params.target=parseFloat($('target').value); params.buy_logic='OR'; }
+  return params;
+}
+
+async function buildBody(){
+  const source=$('source').value;
+  const body={source, symbol:$('symbol').value};
+  if(source==='csv'){
+    const f=$('csvFile').files[0];
+    if(!f) throw new Error('CSV 파일을 선택하세요.');
+    body.csv_text=await readFile(f);
+  }
+  return body;
+}
+
+function parseGrid(s){ return s.split(',').map(x=>parseFloat(x)).filter(x=>!isNaN(x)); }
+
 $('run').onclick = async () => {
   $('err').textContent=''; $('run').disabled=true; $('run').textContent='실행 중…';
   try{
-    const source=$('source').value;
-    const params={
-      tp:parseFloat($('tp').value), sl:parseFloat($('sl').value),
-      qty:parseInt($('qty').value), cash:parseFloat($('cash').value),
-      trailing_stop_pct:parseFloat($('ts').value),
-      use_sma_cross_exit:$('deadcross').checked,
-    };
-    if($('entry').value==='target'){ params.target=parseFloat($('target').value); params.buy_logic='OR'; }
-    const body={source, symbol:$('symbol').value, params};
-    if(source==='csv'){
-      const f=$('csvFile').files[0];
-      if(!f) throw new Error('CSV 파일을 선택하세요.');
-      body.csv_text=await readFile(f);
-    }
+    const body=await buildBody(); body.params=buildParams();
     const res=await fetch('/api/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data=await res.json();
     if(!data.ok) throw new Error(data.error||'실행 실패');
     renderCards(data.stats); drawChart(data.equity_curve); renderTrades(data.trades);
   }catch(e){ $('err').textContent='오류: '+e.message; }
   finally{ $('run').disabled=false; $('run').textContent='백테스트 실행 ▶'; }
+};
+
+function renderOpt(out){
+  $('optPanel').classList.remove('hidden');
+  const head='<thead><tr><th>#</th><th>익절%</th><th>손절%</th><th>트레일%</th><th>수익률</th><th>승률</th><th>MDD</th><th>체결</th></tr></thead>';
+  const rows=out.results.map((r,i)=>{
+    const p=r.params, s=r.stats, tone=s.total_return_pct>=0?'pos':'neg';
+    return '<tr style="cursor:pointer" data-tp="'+p.tp+'" data-sl="'+p.sl+'" data-ts="'+p.trailing_stop_pct+'">'+
+      '<td>'+(i+1)+'</td><td class="num">'+p.tp+'</td><td class="num">'+p.sl+'</td>'+
+      '<td class="num">'+p.trailing_stop_pct+'</td><td class="num '+tone+'">'+(s.total_return_pct>=0?'+':'')+s.total_return_pct+'%</td>'+
+      '<td class="num">'+s.win_rate_pct+'%</td><td class="num">-'+s.max_drawdown_pct+'%</td><td class="num">'+s.num_trades+'</td></tr>';
+  }).join('');
+  const tbl=$('optTable'); tbl.innerHTML=head+'<tbody>'+rows+'</tbody>';
+  tbl.querySelectorAll('tbody tr').forEach(tr=>{
+    tr.onclick=()=>{ $('tp').value=tr.dataset.tp; $('sl').value=tr.dataset.sl; $('ts').value=tr.dataset.ts; $('run').click(); };
+  });
+}
+
+$('opt').onclick = async () => {
+  $('err').textContent=''; $('opt').disabled=true; $('opt').textContent='탐색 중…';
+  try{
+    const body=await buildBody();
+    body.params=buildParams();
+    // 그리드로 스윕하므로 개별 tp/sl/ts는 base에서 제거
+    delete body.params.tp; delete body.params.sl; delete body.params.trailing_stop_pct;
+    body.grid={
+      tp:parseGrid($('tpGrid').value),
+      sl:parseGrid($('slGrid').value),
+      trailing_stop_pct:parseGrid($('tsGrid').value),
+    };
+    body.objective=$('objective').value;
+    const res=await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await res.json();
+    if(!data.ok) throw new Error(data.error||'최적화 실패');
+    renderOpt(data);
+  }catch(e){ $('err').textContent='오류: '+e.message; }
+  finally{ $('opt').disabled=false; $('opt').textContent='최적화 실행 ⚙'; }
 };
 </script>
 </body>
