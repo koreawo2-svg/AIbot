@@ -54,8 +54,30 @@ python main.py --demo --steps 300
 cp config.example.yaml config.yaml   # 값 수정 후
 python main.py --config config.yaml
 
+# 3) HTML 리포트(랜덤워크 데모)
+python main.py --report result.html --steps 400
+
+# 4) 실제 과거 주가 CSV로 백테스트
+#    지정가 진입: 70000 이하 매수, +3% 익절 / -2% 손절
+python main.py --csv 005930=data/sample_005930.csv --target 70000 --tp 3 --sl 2 --qty 100 --report result.html
+#    지표 진입(목표가 생략 시 RSI/이평 돌파로 진입)
+python main.py --csv 005930=data/sample_005930.csv --tp 4 --sl 2 --report result.html
+#    여러 종목 동시
+python main.py --csv 005930=samsung.csv --csv 000660=hynix.csv --report result.html
+
 # 테스트
 python -m pytest -q
+```
+
+### CSV 형식
+네이버 금융 / KRX / 야후파이낸스에서 받은 일봉 CSV를 그대로 쓸 수 있습니다.
+`날짜`·`종가` 컬럼명을 자동 인식하고(`Date`/`Close`/`종가` 등), `"72,000"` 같은 콤마도 처리합니다.
+`data/sample_005930.csv`가 예시 형식입니다.
+
+```
+Date,Open,High,Low,Close,Volume
+2024-01-02,69940,69970,69240,69280,17384713
+...
 ```
 
 ## 전략 동작 방식 (지정가 + 지표 조합)

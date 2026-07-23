@@ -87,6 +87,77 @@ def _print_summary(engine: TradingEngine, broker: PaperBroker) -> None:
         print(f"보유 {sym}: {pos.quantity}주 @ 평단 {pos.avg_price:,.0f}")
 
 
+def run_csv(
+    specs: list[str],
+    report_path: str | None,
+    target: float | None,
+    tp: float,
+    sl: float,
+    qty: int,
+    cash: float,
+) -> None:
+    """실제 과거 주가 CSV로 백테스트한다.
+
+    specs: ["005930=samsung.csv", "000660=hynix.csv"] 형태.
+    target 미지정 시 지표 기반 진입(가격조건은 항상 통과, buy_logic=AND).
+    """
+    from autotrader.backtest import Backtester
+    from autotrader.data_loader import load_close_series
+    from autotrader.market_data import ReplayFeed
+    from autotrader.report import write_report
+    from autotrader.strategy.rule_engine import RuleEngineStrategy, SymbolRule
+
+    price_map: dict[str, list[float]] = {}
+    rules: list[SymbolRule] = []
+    date_range = ""
+    for spec in specs:
+        if "=" not in spec:
+            raise SystemExit(f"--csv 형식 오류: '{spec}' (예: 005930=samsung.csv)")
+        symbol, path = spec.split("=", 1)
+        symbol, path = symbol.strip(), path.strip()
+        dates, closes = load_close_series(path)
+        price_map[symbol] = closes
+        if dates and dates[0]:
+            date_range = f"{dates[0]} ~ {dates[-1]}"
+        # 목표가 미지정이면 매우 높게 잡아 '가격조건 항상 통과' → 지표가 진입을 결정
+        buy_target = target if target is not None else max(closes) * 10
+        buy_logic = "OR" if target is not None else "AND"
+        rules.append(SymbolRule(
+            symbol=symbol,
+            target_buy_price=buy_target,
+            order_quantity=qty,
+            take_profit_pct=tp,
+            stop_loss_pct=sl,
+            buy_logic=buy_logic,
+        ))
+        print(f"로드: {symbol} <- {path} ({len(closes)}개, {date_range})")
+
+    feed = ReplayFeed(price_map)
+    broker = PaperBroker(feed=feed, cash=cash)
+    strategy = RuleEngineStrategy(rules)
+    engine = TradingEngine(
+        broker=broker,
+        strategy=strategy,
+        symbols=list(price_map.keys()),
+        order_type=OrderType.MARKET,
+    )
+    steps = max(len(p) for p in price_map.values())
+    result = Backtester(engine, broker).run(steps)
+
+    title = f"AIbot 백테스트 · {', '.join(price_map.keys())}"
+    if date_range:
+        title += f" ({date_range})"
+    print(
+        f"\n총 수익률 {result.total_return_pct:+.2f}% | "
+        f"승률 {result.win_rate_pct:.0f}% | "
+        f"MDD -{result.max_drawdown_pct:.2f}% | "
+        f"체결 {len(result.trades)}건"
+    )
+    if report_path:
+        write_report(result, report_path, title=title)
+        print(f"리포트 생성: {report_path}")
+
+
 def run_report(path: str, steps: int) -> None:
     """데모 구성으로 백테스트를 돌리고 HTML 리포트를 생성."""
     from autotrader.backtest import Backtester
@@ -110,11 +181,20 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true", help="내장 데모 실행")
     parser.add_argument("--steps", type=int, default=200, help="데모 반복 횟수")
     parser.add_argument("--report", metavar="OUT.html", help="백테스트 HTML 리포트 생성 경로")
+    parser.add_argument("--csv", action="append", metavar="SYMBOL=PATH",
+                        help="실제 과거 주가 CSV로 백테스트 (반복 지정 가능)")
+    parser.add_argument("--target", type=float, help="목표 매수가(미지정 시 지표 기반 진입)")
+    parser.add_argument("--tp", type=float, default=5.0, help="익절 %% (기본 5)")
+    parser.add_argument("--sl", type=float, default=3.0, help="손절 %% (기본 3)")
+    parser.add_argument("--qty", type=int, default=10, help="1회 주문 수량(기본 10)")
+    parser.add_argument("--cash", type=float, default=10_000_000, help="시작 현금")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.report:
+    if args.csv:
+        run_csv(args.csv, args.report, args.target, args.tp, args.sl, args.qty, args.cash)
+    elif args.report:
         run_report(args.report, args.steps)
     elif args.config:
         run_from_config(args.config)
