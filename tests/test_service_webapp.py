@@ -59,3 +59,47 @@ def test_http_endpoint_end_to_end():
         assert "total_return_pct" in data["stats"]
     finally:
         server.shutdown()
+
+
+def _post(port, path, obj):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
+
+
+def _get(port, path):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}") as r:
+        return json.loads(r.read())
+
+
+def test_live_monitor_end_to_end():
+    import time
+    server = ThreadingHTTPServer(("127.0.0.1", 0), webapp.Handler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        started = _post(port, "/api/live/start", {
+            "symbol": "005930",
+            "params": {"target": 70000, "tp": 3, "sl": 2, "qty": 100, "buy_logic": "OR"},
+            "interval": 0.01, "ticks": 25, "start_price": 70000,
+        })
+        assert started["ok"] and started["started"]
+
+        # 자연 종료까지 폴링
+        state = {}
+        for _ in range(200):
+            state = _get(port, "/api/live/state")
+            if not state["running"] and state["tick"] >= 0:
+                break
+            time.sleep(0.02)
+
+        assert state["ok"] is True
+        assert state["running"] is False
+        assert len(state["equity_curve"]) >= 1
+        assert "return_pct" in state
+    finally:
+        webapp.LIVE.stop()
+        server.shutdown()

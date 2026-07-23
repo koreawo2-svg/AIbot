@@ -16,10 +16,18 @@ import argparse
 import json
 import os
 import random
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from autotrader.brokers.paper import PaperBroker
 from autotrader.data_loader import load_close_series, parse_close_series
-from autotrader.service import result_to_dict, run_backtest
+from autotrader.engine import TradingEngine
+from autotrader.market_data import RandomWalkFeed
+from autotrader.models import OrderType
+from autotrader.scheduler import LiveTrader
+from autotrader.service import build_rule, result_to_dict, run_backtest
+from autotrader.strategy.rule_engine import RuleEngineStrategy
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SAMPLE_CSV = os.path.join(_REPO_ROOT, "data", "sample_005930.csv")
@@ -53,6 +61,91 @@ def _load_series(payload: dict) -> tuple[str, list[float]]:
     return symbol or "005930", closes
 
 
+class LiveSession:
+    """백그라운드 스레드에서 실시간(모의) 자동매매를 돌리고 상태를 공유한다."""
+
+    MAX_TRADES = 200
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._trader: LiveTrader | None = None
+        self._thread: threading.Thread | None = None
+        self._reset()
+
+    def _reset(self):
+        self.equity_curve: list[float] = []
+        self.trades: list[dict] = []
+        self.positions: list[dict] = []
+        self.tick = -1
+        self.start_equity = 0.0
+        self.running = False
+        self.error: str | None = None
+
+    def start(self, symbol: str, params: dict, interval: float, ticks: int, start_price: float):
+        with self._lock:
+            if self.running:
+                return  # 이미 실행 중이면 무시
+            self._reset()
+            self.running = True
+
+        # 랜덤워크 실시간 시세로 구성(무한대에 가까운 흐름)
+        seed = int(time.time()) & 0xFFFF
+        feed = RandomWalkFeed(start_prices={symbol: start_price}, volatility=0.012, seed=seed)
+        broker = PaperBroker(feed=feed, cash=float(params.get("cash", 10_000_000)))
+        rule = build_rule(symbol, [start_price], params)
+        engine = TradingEngine(broker, RuleEngineStrategy([rule]), [symbol], OrderType.MARKET)
+
+        def on_tick(snap):
+            with self._lock:
+                self.tick = snap.tick
+                self.equity_curve.append(round(snap.equity, 2))
+                self.positions = snap.positions
+                for t in snap.trades:
+                    self.trades.append({**t, "tick": snap.tick})
+                if len(self.trades) > self.MAX_TRADES:
+                    del self.trades[: len(self.trades) - self.MAX_TRADES]
+
+        self._trader = LiveTrader(engine, broker, interval_sec=interval,
+                                  on_tick=on_tick, sleep_fn=time.sleep)
+        self.start_equity = broker.get_account().cash
+
+        def run():
+            try:
+                self._trader.run(ticks)
+            except Exception as exc:  # 스레드 내 오류 보존
+                with self._lock:
+                    self.error = str(exc)
+            finally:
+                with self._lock:
+                    self.running = False
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._trader:
+            self._trader.stop()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            cur = self.equity_curve[-1] if self.equity_curve else self.start_equity
+            ret = ((cur - self.start_equity) / self.start_equity * 100.0) if self.start_equity else 0.0
+            return {
+                "running": self.running,
+                "tick": self.tick,
+                "equity": round(cur, 2),
+                "start_equity": round(self.start_equity, 2),
+                "return_pct": round(ret, 2),
+                "equity_curve": list(self.equity_curve),
+                "positions": list(self.positions),
+                "trades": list(reversed(self.trades[-40:])),  # 최신 우선
+                "error": self.error,
+            }
+
+
+LIVE = LiveSession()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # 콘솔 소음 줄이기
         pass
@@ -67,6 +160,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+        elif self.path == "/api/live/state":
+            body = json.dumps({"ok": True, **LIVE.snapshot()}).encode("utf-8")
+            self._send(200, body, "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -78,6 +174,11 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._backtest(payload)
             elif self.path == "/api/optimize":
                 data = self._optimize(payload)
+            elif self.path == "/api/live/start":
+                data = self._live_start(payload)
+            elif self.path == "/api/live/stop":
+                LIVE.stop()
+                data = {"stopped": True}
             else:
                 self._send(404, b"not found", "text/plain; charset=utf-8")
                 return
@@ -94,6 +195,15 @@ class Handler(BaseHTTPRequestHandler):
         data["symbol"] = symbol
         data["points"] = len(closes)
         return data
+
+    def _live_start(self, payload: dict) -> dict:
+        symbol = (payload.get("symbol") or "005930").strip()
+        params = payload.get("params", {})
+        interval = float(payload.get("interval", 0.5))
+        ticks = int(payload.get("ticks", 240))
+        start_price = float(payload.get("start_price", params.get("target") or 70000))
+        LIVE.start(symbol, params, interval, ticks, start_price)
+        return {"started": True}
 
     def _optimize(self, payload: dict) -> dict:
         from autotrader.optimizer import optimize
@@ -230,6 +340,11 @@ INDEX_HTML = r"""<!doctype html>
 
       <button id="run">백테스트 실행 ▶</button>
 
+      <div class="row" style="margin-top:10px">
+        <div><button id="live" style="background:#059669;margin-top:0">실시간 시작 ▶</button></div>
+        <div><button id="livestop" style="background:#4b5563;margin-top:0" disabled>정지 ■</button></div>
+      </div>
+
       <h2 style="margin-top:22px">파라미터 자동 최적화</h2>
       <label>익절% 후보 (콤마)</label><input id="tpGrid" value="2,3,4,5"/>
       <label>손절% 후보 (콤마)</label><input id="slGrid" value="1,2,3"/>
@@ -246,6 +361,17 @@ INDEX_HTML = r"""<!doctype html>
 
     <!-- 결과 패널 -->
     <div>
+      <div id="livePanel" class="panel hidden" style="margin-bottom:16px">
+        <h2><span id="liveDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--pos);margin-right:6px"></span>실시간 모니터 <span id="liveState" class="muted"></span></h2>
+        <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:8px">
+          <div id="liveEquity" style="font-size:24px;font-weight:700;font-variant-numeric:tabular-nums">-</div>
+          <div id="liveRet" style="font-size:16px;font-weight:600">-</div>
+          <div id="liveTick" class="muted"></div>
+        </div>
+        <div id="liveChart" style="color:var(--muted)"></div>
+        <div id="livePos" class="muted" style="margin-top:8px"></div>
+        <div class="tablewrap" style="max-height:180px;margin-top:8px"><table id="liveTrades"></table></div>
+      </div>
       <div id="cards" class="cards"></div>
       <div class="panel" style="margin-bottom:16px">
         <h2>평가금액 곡선</h2>
@@ -281,8 +407,9 @@ function readFile(file){
   });
 }
 
-function drawChart(values){
-  if(!values || values.length < 2){ $('chart').innerHTML = '<p class="muted">데이터 부족</p>'; return; }
+function drawChartInto(elId, values){
+  const el=$(elId);
+  if(!values || values.length < 2){ el.innerHTML = '<p class="muted">데이터 부족</p>'; return; }
   const W=820,H=240,pad=8;
   const lo=Math.min(...values), hi=Math.max(...values), span=(hi-lo)||1;
   const x=i=>pad+i*(W-2*pad)/(values.length-1);
@@ -292,12 +419,13 @@ function drawChart(values){
   const base=values[0], up=values[values.length-1]>=base;
   const col=up?'#16a34a':'#dc2626';
   const area='M '+pts[0][0].toFixed(1)+','+(H-pad)+' '+pts.map(p=>'L '+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')+' L '+pts[pts.length-1][0].toFixed(1)+','+(H-pad)+' Z';
-  $('chart').innerHTML =
+  el.innerHTML =
     '<svg viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="none">'+
     '<line x1="'+pad+'" y1="'+y(base).toFixed(1)+'" x2="'+(W-pad)+'" y2="'+y(base).toFixed(1)+'" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="4 4"/>'+
     '<path d="'+area+'" fill="'+col+'" fill-opacity="0.16"/>'+
     '<polyline points="'+line+'" fill="none" stroke="'+col+'" stroke-width="2" stroke-linejoin="round"/></svg>';
 }
+function drawChart(values){ drawChartInto('chart', values); }
 
 function renderCards(s){
   const t = s.total_return_pct;
@@ -377,6 +505,59 @@ function renderOpt(out){
     tr.onclick=()=>{ $('tp').value=tr.dataset.tp; $('sl').value=tr.dataset.sl; $('ts').value=tr.dataset.ts; $('run').click(); };
   });
 }
+
+let livePoll=null;
+function renderLive(s){
+  $('livePanel').classList.remove('hidden');
+  $('liveEquity').textContent = fmt(Math.round(s.equity));
+  const r=s.return_pct;
+  $('liveRet').textContent=(r>=0?'+':'')+r+'%';
+  $('liveRet').className=r>=0?'pos':'neg';
+  $('liveTick').textContent='틱 '+(s.tick+1);
+  $('liveDot').style.background=s.running?'var(--pos)':'var(--muted)';
+  $('liveState').textContent=s.running?'실행 중':'정지됨';
+  drawChartInto('liveChart', s.equity_curve);
+  $('livePos').textContent = s.positions.length
+    ? '보유: '+s.positions.map(p=>p.symbol+' '+p.quantity+'주('+(p.pnl_pct>=0?'+':'')+p.pnl_pct+'%)').join('  ')
+    : '보유 없음';
+  const rows=s.trades.map(t=>{
+    const buy=t.action.indexOf('BUY')===0;
+    return '<tr><td class="muted">틱'+t.tick+'</td><td><span class="pill '+(buy?'buy':'sell')+'">'+t.action+'</span></td>'+
+      '<td>'+t.symbol+'</td><td class="num">'+t.quantity+'</td><td class="num">'+fmt(t.price)+'</td><td class="reason">'+t.reason+'</td></tr>';
+  }).join('');
+  $('liveTrades').innerHTML='<tbody>'+(rows||'<tr><td class="muted">체결 대기 중…</td></tr>')+'</tbody>';
+}
+async function pollLive(){
+  try{
+    const res=await fetch('/api/live/state');
+    const s=await res.json();
+    if(!s.ok) return;
+    renderLive(s);
+    if(!s.running){ stopPolling(); }
+  }catch(e){ stopPolling(); }
+}
+function stopPolling(){
+  if(livePoll){ clearInterval(livePoll); livePoll=null; }
+  $('live').disabled=false; $('live').textContent='실시간 시작 ▶';
+  $('livestop').disabled=true;
+}
+$('live').onclick = async () => {
+  $('err').textContent='';
+  try{
+    const body=await buildBody(); body.params=buildParams();
+    body.interval=0.4; body.ticks=300;
+    if($('entry').value==='target') body.start_price=parseFloat($('target').value);
+    const res=await fetch('/api/live/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await res.json();
+    if(!d.ok) throw new Error(d.error||'시작 실패');
+    $('live').disabled=true; $('live').textContent='실행 중…'; $('livestop').disabled=false;
+    if(livePoll) clearInterval(livePoll);
+    livePoll=setInterval(pollLive, 500); pollLive();
+  }catch(e){ $('err').textContent='오류: '+e.message; }
+};
+$('livestop').onclick = async () => {
+  await fetch('/api/live/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+};
 
 $('opt').onclick = async () => {
   $('err').textContent=''; $('opt').disabled=true; $('opt').textContent='탐색 중…';
