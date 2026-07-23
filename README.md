@@ -28,6 +28,13 @@ autotrader/
 ├── models.py              # 주문/포지션/시세 등 공통 자료구조
 ├── market_data.py         # 시세 피드(랜덤워크/재생)
 ├── engine.py              # 시세→신호→주문 루프
+├── scheduler.py           # 실시간 자동매매 루프(LiveTrader) — 브로커 교체 시 실거래
+├── backtest.py            # 백테스트 실행/통계(수익률·승률·MDD)
+├── optimizer.py           # 파라미터 그리드 자동 최적화
+├── service.py             # CLI·웹 공용 백테스트 실행/직렬화
+├── data_loader.py         # CSV 과거주가 로더(컬럼 자동 인식)
+├── report.py              # HTML 백테스트 리포트 생성
+├── webapp.py              # 브라우저 대시보드(표준 라이브러리 서버)
 ├── config.py              # YAML 설정 로더
 ├── brokers/
 │   ├── base.py            # BrokerAdapter 인터페이스(증권사 공통 규약)
@@ -37,8 +44,8 @@ autotrader/
 │   └── shinhan.py         # 신한 어댑터 골격
 └── strategy/
     ├── base.py            # 전략 인터페이스/신호 타입
-    ├── indicators.py      # SMA, RSI, 이평 상향돌파
-    └── rule_engine.py     # 지정가 + 지표 조합 규칙 전략
+    ├── indicators.py      # SMA, RSI, 골든/데드크로스
+    └── rule_engine.py     # 지정가 + 지표 + 트레일링스톱 규칙 전략
 ```
 
 ## 실행
@@ -70,7 +77,13 @@ python main.py --optimize --tp-grid 2,3,4,5 --sl-grid 1,2,3 --ts-grid 0,3,5 --ta
 #   실제 CSV로: --csv 005930=samsung.csv 추가
 #   목표 지표: --objective return | return_dd(위험조정) | winrate
 
-# 6) 웹 대시보드 (브라우저에서 클릭으로 조작)
+# 6) 실시간 자동매매 시뮬레이션 (장중 루프)
+python main.py --live --interval 1 --ticks 60 --state-file state.json
+#   틱마다 시세를 받아 자동 매수/매도. 현재는 모의(PaperBroker)지만
+#   broker만 실제 증권사 어댑터로 교체하면 그대로 실거래 루프가 됩니다.
+#   --state-file: 틱마다 현재 상태(평가금/보유/체결)를 JSON으로 기록
+
+# 7) 웹 대시보드 (브라우저에서 클릭으로 조작)
 python -m autotrader.webapp        # http://127.0.0.1:8000 접속
 #   → 데이터소스/목표가/익절·손절/트레일링스톱을 화면에서 조절하고
 #     '백테스트 실행'을 누르면 수익곡선·통계·매매내역이 즉시 표시됩니다.

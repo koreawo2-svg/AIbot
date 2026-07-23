@@ -219,6 +219,35 @@ def run_optimize(
         print(f"\n▶ 추천 조합: {best['params']} → 수익률 {best['stats']['total_return_pct']:+.2f}%")
 
 
+def run_live(interval: float, ticks: int, state_file: str | None) -> None:
+    """실시간 자동매매 시뮬레이션(장중 루프). 브로커만 교체하면 실거래가 된다."""
+    from autotrader.scheduler import LiveTrader, TickSnapshot
+
+    engine, broker = build_demo()
+
+    def printer(snap: TickSnapshot) -> None:
+        pos = " ".join(
+            f"{p['symbol']}:{p['quantity']}주({p['pnl_pct']:+.1f}%)" for p in snap.positions
+        ) or "보유없음"
+        trades = " ".join(f"[{t['action']} {t['symbol']}@{t['price']:,.0f}]" for t in snap.trades)
+        print(
+            f"틱 {snap.tick:>3} | 평가금 {snap.equity:>12,.0f} | 현금 {snap.cash:>12,.0f} | "
+            f"{pos}" + (f" | {trades}" if trades else "")
+        )
+
+    print(f"실시간 자동매매 시뮬레이션 시작 (간격 {interval}s, {ticks}틱). Ctrl+C로 중단.\n")
+    trader = LiveTrader(engine, broker, interval_sec=interval,
+                        state_file=state_file, on_tick=printer)
+    try:
+        trader.run(ticks)
+    except KeyboardInterrupt:
+        trader.stop()
+        print("\n사용자 중단.")
+    final = broker.equity()
+    ret = (final - 10_000_000) / 10_000_000 * 100
+    print(f"\n종료 · 최종 평가금 {final:,.0f} ({ret:+.2f}%)")
+
+
 def run_report(path: str, steps: int) -> None:
     """데모 구성으로 백테스트를 돌리고 HTML 리포트를 생성."""
     from autotrader.backtest import Backtester
@@ -255,11 +284,19 @@ def main() -> None:
     parser.add_argument("--ts-grid", default="0,3,5", help="트레일링스톱 후보(콤마, 0=미사용)")
     parser.add_argument("--objective", default="return",
                         choices=["return", "return_dd", "winrate"], help="최적화 목표")
+    parser.add_argument("--live", action="store_true", help="실시간 자동매매 시뮬레이션(장중 루프)")
+    parser.add_argument("--interval", type=float, default=1.0, help="틱 간격(초)")
+    parser.add_argument("--ticks", type=int, default=60, help="실시간 시뮬레이션 틱 수")
+    parser.add_argument("--state-file", help="틱마다 현재 상태를 기록할 JSON 경로")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # 실시간 모드는 자체 상태줄만 출력하도록 엔진 INFO 로그를 끈다
+    level = logging.WARNING if args.live else logging.INFO
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.optimize:
+    if args.live:
+        run_live(args.interval, args.ticks, args.state_file)
+    elif args.optimize:
         run_optimize(args.csv, args.tp_grid, args.sl_grid, args.ts_grid,
                      args.objective, args.target, args.qty, args.cash)
     elif args.csv:

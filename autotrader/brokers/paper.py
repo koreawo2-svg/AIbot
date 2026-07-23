@@ -61,6 +61,10 @@ class PaperBroker(BrokerAdapter):
         """현금 + 보유종목 평가금액(가장 최근 시세 기준)."""
         return self._account.equity(self._last_quotes)
 
+    def last_prices(self) -> dict[str, float]:
+        """종목별 가장 최근 체결 시세."""
+        return {s: q.price for s, q in self._last_quotes.items()}
+
     # --- 주문 ---
     def place_order(self, order: Order) -> Order:
         quote = self._last_quotes.get(order.symbol)
