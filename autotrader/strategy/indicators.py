@@ -50,3 +50,14 @@ def crossed_above(prices: list[float], period: int) -> bool:
     if prev_sma is None or cur_sma is None:
         return False
     return prices[-2] <= prev_sma and prices[-1] > cur_sma
+
+
+def crossed_below(prices: list[float], period: int) -> bool:
+    """직전 봉에서 이동평균 위였다가 현재 아래로 이탈했는지(데드크로스 성격)."""
+    if len(prices) < period + 1:
+        return False
+    prev_sma = sma(prices[:-1], period)
+    cur_sma = sma(prices, period)
+    if prev_sma is None or cur_sma is None:
+        return False
+    return prices[-2] >= prev_sma and prices[-1] < cur_sma

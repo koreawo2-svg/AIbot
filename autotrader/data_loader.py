@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import csv
+import io
 
 _DATE_CANDIDATES = ("date", "날짜", "일자", "datetime", "time", "기준일자")
 _CLOSE_CANDIDATES = ("close", "종가", "adj close", "adjclose", "adj_close", "현재가")
@@ -35,42 +36,41 @@ def _match_column(fieldnames: list[str], candidates: tuple[str, ...]) -> str | N
     return None
 
 
-def load_close_series(
-    path: str,
+def parse_close_series(
+    text: str,
     date_col: str | None = None,
     price_col: str | None = None,
 ) -> tuple[list[str], list[float]]:
-    """CSV에서 (날짜 리스트, 종가 리스트)를 날짜 오름차순으로 반환.
+    """CSV 텍스트에서 (날짜 리스트, 종가 리스트)를 날짜 오름차순으로 반환."""
+    # BOM 제거
+    if text.startswith("﻿"):
+        text = text[1:]
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV 헤더를 읽을 수 없습니다.")
 
-    date_col/price_col을 직접 지정하지 않으면 컬럼명을 자동 인식한다.
-    """
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            raise ValueError(f"CSV 헤더를 읽을 수 없습니다: {path}")
+    dcol = date_col or _match_column(reader.fieldnames, _DATE_CANDIDATES)
+    pcol = price_col or _match_column(reader.fieldnames, _CLOSE_CANDIDATES)
+    if pcol is None:
+        raise ValueError(
+            f"종가 컬럼을 찾지 못했습니다. 컬럼: {reader.fieldnames}. "
+            "price_col 인자로 직접 지정하세요."
+        )
 
-        dcol = date_col or _match_column(reader.fieldnames, _DATE_CANDIDATES)
-        pcol = price_col or _match_column(reader.fieldnames, _CLOSE_CANDIDATES)
-        if pcol is None:
-            raise ValueError(
-                f"종가 컬럼을 찾지 못했습니다. 컬럼: {reader.fieldnames}. "
-                "price_col 인자로 직접 지정하세요."
-            )
-
-        rows: list[tuple[str, float]] = []
-        for line in reader:
-            raw_price = line.get(pcol, "")
-            if raw_price is None or str(raw_price).strip() == "":
-                continue
-            try:
-                price = _clean_number(str(raw_price))
-            except ValueError:
-                continue  # 숫자로 못 바꾸는 행은 건너뜀
-            date = str(line.get(dcol, "")).strip() if dcol else ""
-            rows.append((date, price))
+    rows: list[tuple[str, float]] = []
+    for line in reader:
+        raw_price = line.get(pcol, "")
+        if raw_price is None or str(raw_price).strip() == "":
+            continue
+        try:
+            price = _clean_number(str(raw_price))
+        except ValueError:
+            continue  # 숫자로 못 바꾸는 행은 건너뜀
+        date = str(line.get(dcol, "")).strip() if dcol else ""
+        rows.append((date, price))
 
     if not rows:
-        raise ValueError(f"유효한 가격 데이터가 없습니다: {path}")
+        raise ValueError("유효한 가격 데이터가 없습니다.")
 
     # 날짜가 있으면 날짜 오름차순 정렬(ISO 문자열은 사전식=시간순)
     if any(d for d, _ in rows):
@@ -79,3 +79,16 @@ def load_close_series(
     dates = [d for d, _ in rows]
     prices = [p for _, p in rows]
     return dates, prices
+
+
+def load_close_series(
+    path: str,
+    date_col: str | None = None,
+    price_col: str | None = None,
+) -> tuple[list[str], list[float]]:
+    """CSV 파일에서 (날짜 리스트, 종가 리스트)를 날짜 오름차순으로 반환.
+
+    date_col/price_col을 직접 지정하지 않으면 컬럼명을 자동 인식한다.
+    """
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        return parse_close_series(f.read(), date_col=date_col, price_col=price_col)

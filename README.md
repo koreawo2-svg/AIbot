@@ -65,9 +65,38 @@ python main.py --csv 005930=data/sample_005930.csv --tp 4 --sl 2 --report result
 #    여러 종목 동시
 python main.py --csv 005930=samsung.csv --csv 000660=hynix.csv --report result.html
 
+# 5) 웹 대시보드 (브라우저에서 클릭으로 조작)
+python -m autotrader.webapp        # http://127.0.0.1:8000 접속
+#   → 데이터소스/목표가/익절·손절/트레일링스톱을 화면에서 조절하고
+#     '백테스트 실행'을 누르면 수익곡선·통계·매매내역이 즉시 표시됩니다.
+#     추가 패키지 설치가 필요 없습니다(파이썬 표준 라이브러리만 사용).
+
 # 테스트
 python -m pytest -q
 ```
+
+## 웹 대시보드
+
+![대시보드 미리보기](dashboard_preview.png)
+
+```bash
+python -m autotrader.webapp --port 8000
+```
+- **데이터 소스**: 샘플(005930) · CSV 업로드 · 랜덤워크 데모
+- **화면에서 조절**: 진입방식(지정가/지표), 목표가, 익절%, 손절%, 수량, 트레일링스톱%, 데드크로스 매도, 시작현금
+- 실행 즉시 **수익곡선 + 통계카드(수익률/승률/MDD) + 매매내역**을 시각화
+- 파이썬 표준 라이브러리만 사용 → `pip install` 없이 바로 실행
+
+## 전략 강화 옵션
+
+| 옵션 | 설명 |
+|---|---|
+| `take_profit_pct` / `stop_loss_pct` | 익절 / 손절 기준(%) |
+| `trailing_stop_pct` | 트레일링 스톱 — 보유 중 **고점 대비** 이만큼 하락하면 매도(0=비활성) |
+| `use_sma_cross` | 이동평균 **상향 돌파(골든크로스)** 매수 |
+| `use_sma_cross_exit` | 이동평균 **하향 이탈(데드크로스)** 매도 |
+| `use_rsi` | RSI 과매도 매수 / 과매수 매도 |
+| `buy_logic` | 가격조건과 지표조건의 결합(`AND`/`OR`) |
 
 ### CSV 형식
 네이버 금융 / KRX / 야후파이낸스에서 받은 일봉 CSV를 그대로 쓸 수 있습니다.

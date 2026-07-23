@@ -36,6 +36,9 @@ class SymbolRule:
     use_rsi: bool = True
     # 매수 시 가격조건과 지표조건 결합 방식
     buy_logic: str = "AND"           # "AND" 또는 "OR"
+    # 강화 옵션
+    trailing_stop_pct: float = 0.0   # 0이면 비활성. 고점 대비 이만큼 하락하면 매도
+    use_sma_cross_exit: bool = False  # 데드크로스(이평 하향이탈) 시 매도
 
 
 class RuleEngineStrategy(Strategy):
@@ -44,6 +47,7 @@ class RuleEngineStrategy(Strategy):
     def __init__(self, rules: list[SymbolRule], history_limit: int = 500):
         self._rules: dict[str, SymbolRule] = {r.symbol: r for r in rules}
         self._history: dict[str, list[float]] = {r.symbol: [] for r in rules}
+        self._peak: dict[str, float] = {}   # 보유 중 고점(트레일링 스톱용)
         self._history_limit = history_limit
 
     def on_quote(self, quote: Quote, position: Position | None) -> Signal:
@@ -58,6 +62,8 @@ class RuleEngineStrategy(Strategy):
 
         if position and position.quantity > 0:
             return self._evaluate_sell(rule, quote, position, prices)
+        # 미보유 상태면 고점 추적 초기화
+        self._peak.pop(quote.symbol, None)
         return self._evaluate_buy(rule, quote, prices)
 
     # --- 매수 ---
@@ -107,14 +113,30 @@ class RuleEngineStrategy(Strategy):
         pnl = position.unrealized_pnl_pct(quote.price)
         qty = position.quantity
 
+        # 고점 갱신(트레일링 스톱 기준)
+        peak = max(self._peak.get(rule.symbol, quote.price), quote.price)
+        self._peak[rule.symbol] = peak
+
         if pnl >= rule.take_profit_pct:
             return Signal(rule.symbol, SignalType.SELL, qty, f"익절 pnl={pnl:.2f}%")
         if pnl <= -rule.stop_loss_pct:
             return Signal(rule.symbol, SignalType.SELL, qty, f"손절 pnl={pnl:.2f}%")
 
+        # 트레일링 스톱: 고점 대비 하락률이 기준 이상이면 매도
+        if rule.trailing_stop_pct > 0 and peak > 0:
+            drop = (peak - quote.price) / peak * 100.0
+            if drop >= rule.trailing_stop_pct:
+                return Signal(
+                    rule.symbol, SignalType.SELL, qty,
+                    f"트레일링스톱 고점대비-{drop:.2f}% (pnl={pnl:.2f}%)",
+                )
+
         if rule.use_rsi:
             r = indicators.rsi(prices, rule.rsi_period)
             if r is not None and r > rule.rsi_overbought:
                 return Signal(rule.symbol, SignalType.SELL, qty, f"RSI과매수={r:.1f}")
+
+        if rule.use_sma_cross_exit and indicators.crossed_below(prices, rule.sma_period):
+            return Signal(rule.symbol, SignalType.SELL, qty, "데드크로스(이평 하향이탈)")
 
         return Signal(rule.symbol, SignalType.HOLD, reason=f"보유 pnl={pnl:.2f}%")

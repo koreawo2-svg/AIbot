@@ -42,3 +42,5 @@ rules:
     take_profit_pct: 4.0
     stop_loss_pct: 2.5
     buy_logic: "AND"          # 가격조건 AND 지표조건이어야 매수
+    trailing_stop_pct: 3.0    # 고점 대비 -3% 하락 시 매도(0=비활성)
+    use_sma_cross_exit: true  # 데드크로스(이평 하향이탈) 시 매도
