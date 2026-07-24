@@ -6,10 +6,35 @@ PyYAML이 설치돼 있으면 우선 사용한다.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 from autotrader.strategy.rule_engine import SymbolRule
+
+
+def kiwoom_credentials_from_env() -> tuple[str, str, str]:
+    """환경변수에서 키움 인증정보를 읽는다.
+
+    필요: KIWOOM_APP_KEY, KIWOOM_APP_SECRET, KIWOOM_ACCOUNT_NO
+    (키는 절대 코드/저장소에 넣지 말고 환경변수나 .env로 주입)
+    """
+    app_key = os.environ.get("KIWOOM_APP_KEY", "")
+    app_secret = os.environ.get("KIWOOM_APP_SECRET", "")
+    account_no = os.environ.get("KIWOOM_ACCOUNT_NO", "")
+    missing = [
+        name for name, val in [
+            ("KIWOOM_APP_KEY", app_key),
+            ("KIWOOM_APP_SECRET", app_secret),
+            ("KIWOOM_ACCOUNT_NO", account_no),
+        ] if not val
+    ]
+    if missing:
+        raise RuntimeError(
+            "키움 인증정보 환경변수가 없습니다: " + ", ".join(missing) +
+            "\n예) export KIWOOM_APP_KEY=... KIWOOM_APP_SECRET=... KIWOOM_ACCOUNT_NO=..."
+        )
+    return app_key, app_secret, account_no
 
 
 def _load_yaml(path: str) -> dict[str, Any]:

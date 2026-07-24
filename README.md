@@ -8,10 +8,10 @@
 
 | 증권사 (프로그램) | 개인용 공개 자동매매 API | 이 프로젝트에서 |
 |---|---|---|
-| NH투자증권 (나무) | 제공 (Open API + 모의투자) | `nh` 어댑터 골격 준비 — 키 발급 후 구현 |
+| **키움증권 (영웅문)** | 제공 (신규 REST API + 모의투자) | ✅ `kiwoom` 어댑터 구현 — 토큰/시세/잔고/주문 |
+| NH투자증권 (나무) | 제공 (Open API + 모의투자) | `nh` 어댑터 골격 — 키 발급 후 구현 |
 | 메리츠증권 | 제한적/불확실 — **직접 확인 필요** | `meritz` 어댑터 골격(가용성 확인 안내) |
 | 신한투자증권 | 제한적/불확실 — **직접 확인 필요** | `shinhan` 어댑터 골격(가용성 확인 안내) |
-| 한국투자증권(KIS)·키움 | 제공(문서·예제 풍부) | 참고: 자동매매 API가 가장 탄탄한 편 |
 
 > "영웅문/나무 화면을 자동 클릭"하는 매크로 방식은 약관 위반 소지와 불안정성 때문에 권장하지 않습니다.
 > 정석은 각 증권사의 **공식 Open API**로 별도 프로그램이 직접 주문을 넣는 방식입니다.
@@ -39,6 +39,7 @@ autotrader/
 ├── brokers/
 │   ├── base.py            # BrokerAdapter 인터페이스(증권사 공통 규약)
 │   ├── paper.py           # PaperBroker(모의투자 시뮬레이터) ✅ 동작
+│   ├── kiwoom.py          # 키움증권 REST API 어댑터 ✅ 구현
 │   ├── nh.py              # 나무(NH) 어댑터 골격
 │   ├── meritz.py          # 메리츠 어댑터 골격
 │   └── shinhan.py         # 신한 어댑터 골격
@@ -145,9 +146,46 @@ Date,Open,High,Low,Close,Volume
 
 종목별 파라미터는 `config.yaml`의 `rules`에서 조정합니다.
 
-## 실제 증권사 연결하기 (다음 단계)
+## 키움증권 REST API 연동
 
-1. 사용할 증권사에서 Open API 신청 → APP KEY/SECRET, 계좌번호 발급
-2. 해당 어댑터(`brokers/nh.py` 등)의 `connect`/`get_quote`/`place_order`를 API 호출로 구현
-3. 인증정보는 환경변수 또는 커밋되지 않는 `config.yaml`로 주입
-4. **모의투자 계좌**로 검증 → 이후 실계좌 소액으로 단계적 적용
+키움 신규 REST API를 사용합니다(구 OpenAPI+ OCX가 아님 → OS 제약 없음).
+
+### 1) 준비
+1. [키움 REST API 포털](https://openapi.kiwoom.com)에서 **REST API 사용 신청** → `APP KEY` / `SECRET KEY` 발급
+2. **모의투자** 신청(먼저 반드시 모의로 검증)
+3. 인증정보를 환경변수로 주입 (**절대 커밋 금지** — `.env`는 `.gitignore`에 포함됨)
+   ```bash
+   export KIWOOM_APP_KEY="발급받은_APP_KEY"
+   export KIWOOM_APP_SECRET="발급받은_SECRET"
+   export KIWOOM_ACCOUNT_NO="계좌번호"
+   ```
+
+### 2) 연결 테스트 (토큰 → 현재가 → 잔고)
+```bash
+python main.py --kiwoom-check --symbol 005930      # 모의투자(mockapi)로 확인
+```
+
+### 3) 실시간 자동매매 — 키움 모의투자 계좌로
+```bash
+python main.py --live --broker kiwoom --interval 3 --ticks 100
+#   기본은 모의투자(mockapi). 실전은 --real 을 붙여야 하며 실제 주문이 나갑니다.
+```
+
+### API 사양(어댑터가 사용하는 값)
+| 구분 | 값 |
+|---|---|
+| Base URL | 모의 `https://mockapi.kiwoom.com` · 실전 `https://api.kiwoom.com` |
+| 토큰 | `POST /oauth2/token` · `{grant_type:"client_credentials", appkey, secretkey}` |
+| 시세 | `POST /api/dostk/stkinfo` · `api-id: ka10001` |
+| 잔고 | `POST /api/dostk/acnt` · `api-id: kt00004` |
+| 주문 | `POST /api/dostk/ordr` · `api-id: kt10000`(매수)/`kt10001`(매도) |
+
+> ⚠️ 응답 필드명(현재가·잔고 항목)은 계정/버전에 따라 다를 수 있습니다. 모의투자로 실제 응답을
+> 한 번 확인하고 `brokers/kiwoom.py`의 필드 매핑을 조정하세요. `--real`(실전)은 실제 체결이
+> 발생하므로 모의투자로 충분히 검증한 뒤에만 사용하세요.
+
+## 다른 증권사 연결하기
+
+`brokers/kiwoom.py`를 참고해 `nh.py`/`meritz.py`/`shinhan.py`의
+`connect`/`get_quote`/`place_order`를 각 증권사 API로 채우면 됩니다.
+전략·엔진·대시보드는 `BrokerAdapter` 인터페이스에만 의존하므로 브로커만 갈아끼우면 됩니다.

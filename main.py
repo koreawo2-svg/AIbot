@@ -219,11 +219,56 @@ def run_optimize(
         print(f"\n▶ 추천 조합: {best['params']} → 수익률 {best['stats']['total_return_pct']:+.2f}%")
 
 
-def run_live(interval: float, ticks: int, state_file: str | None) -> None:
-    """실시간 자동매매 시뮬레이션(장중 루프). 브로커만 교체하면 실거래가 된다."""
+def kiwoom_check(symbol: str, paper: bool) -> None:
+    """키움 REST API 연결 테스트: 토큰 발급 → 현재가 조회 → 잔고 조회."""
+    from autotrader.brokers.kiwoom import KiwoomBroker
+    from autotrader.config import kiwoom_credentials_from_env
+
+    app_key, app_secret, account_no = kiwoom_credentials_from_env()
+    mode = "모의투자(mockapi)" if paper else "실전투자(api)"
+    print(f"키움 연결 테스트 · {mode} · 계좌 {account_no}")
+    broker = KiwoomBroker(app_key, app_secret, account_no, paper=paper)
+    broker.connect()
+    print("  ✓ 토큰 발급 성공")
+    q = broker.get_quote(symbol)
+    print(f"  ✓ {symbol} 현재가: {q.price:,.0f}")
+    acct = broker.get_account()
+    print(f"  ✓ 주문가능현금: {acct.cash:,.0f} | 보유종목 {len(acct.positions)}개")
+    for sym, pos in acct.positions.items():
+        print(f"     - {sym}: {pos.quantity}주 @ {pos.avg_price:,.0f}")
+
+
+def build_kiwoom_live(paper: bool):
+    """키움 브로커 + 데모 전략으로 실시간 엔진 구성."""
+    from autotrader.brokers.kiwoom import KiwoomBroker
+    from autotrader.config import kiwoom_credentials_from_env
+    from autotrader.engine import TradingEngine
+    from autotrader.strategy.rule_engine import RuleEngineStrategy, SymbolRule
+
+    app_key, app_secret, account_no = kiwoom_credentials_from_env()
+    broker = KiwoomBroker(app_key, app_secret, account_no, paper=paper)
+    rules = [SymbolRule(symbol="005930", target_buy_price=70000, order_quantity=1,
+                        take_profit_pct=3.0, stop_loss_pct=2.0, buy_logic="OR")]
+    engine = TradingEngine(broker, RuleEngineStrategy(rules),
+                           [r.symbol for r in rules], OrderType.MARKET)
+    return engine, broker
+
+
+def run_live(interval: float, ticks: int, state_file: str | None,
+             broker_name: str = "paper", paper: bool = True) -> None:
+    """실시간 자동매매(장중 루프).
+
+    broker_name='paper'  : 모의 시뮬레이터(랜덤워크 시세)
+    broker_name='kiwoom' : 키움 REST API (paper=True면 모의투자 계좌)
+    """
     from autotrader.scheduler import LiveTrader, TickSnapshot
 
-    engine, broker = build_demo()
+    if broker_name == "kiwoom":
+        if not paper:
+            print("⚠️  실전투자 모드입니다. 실제 주문이 체결될 수 있습니다.")
+        engine, broker = build_kiwoom_live(paper=paper)
+    else:
+        engine, broker = build_demo()
 
     def printer(snap: TickSnapshot) -> None:
         pos = " ".join(
@@ -235,16 +280,18 @@ def run_live(interval: float, ticks: int, state_file: str | None) -> None:
             f"{pos}" + (f" | {trades}" if trades else "")
         )
 
-    print(f"실시간 자동매매 시뮬레이션 시작 (간격 {interval}s, {ticks}틱). Ctrl+C로 중단.\n")
+    label = "키움 " + ("모의투자" if paper else "실전투자") if broker_name == "kiwoom" else "시뮬레이션"
+    print(f"실시간 자동매매 시작 [{label}] (간격 {interval}s, {ticks}틱). Ctrl+C로 중단.\n")
     trader = LiveTrader(engine, broker, interval_sec=interval,
                         state_file=state_file, on_tick=printer)
+    start_equity = broker.equity()
     try:
         trader.run(ticks)
     except KeyboardInterrupt:
         trader.stop()
         print("\n사용자 중단.")
     final = broker.equity()
-    ret = (final - 10_000_000) / 10_000_000 * 100
+    ret = ((final - start_equity) / start_equity * 100) if start_equity else 0.0
     print(f"\n종료 · 최종 평가금 {final:,.0f} ({ret:+.2f}%)")
 
 
@@ -284,18 +331,34 @@ def main() -> None:
     parser.add_argument("--ts-grid", default="0,3,5", help="트레일링스톱 후보(콤마, 0=미사용)")
     parser.add_argument("--objective", default="return",
                         choices=["return", "return_dd", "winrate"], help="최적화 목표")
-    parser.add_argument("--live", action="store_true", help="실시간 자동매매 시뮬레이션(장중 루프)")
+    parser.add_argument("--live", action="store_true", help="실시간 자동매매(장중 루프)")
     parser.add_argument("--interval", type=float, default=1.0, help="틱 간격(초)")
-    parser.add_argument("--ticks", type=int, default=60, help="실시간 시뮬레이션 틱 수")
+    parser.add_argument("--ticks", type=int, default=60, help="실시간 틱 수")
     parser.add_argument("--state-file", help="틱마다 현재 상태를 기록할 JSON 경로")
+    parser.add_argument("--broker", default="paper", choices=["paper", "kiwoom"],
+                        help="실시간 브로커: paper(모의 시뮬) 또는 kiwoom")
+    parser.add_argument("--real", action="store_true",
+                        help="키움 실전투자 모드(미지정 시 모의투자). 실제 주문 주의!")
+    parser.add_argument("--kiwoom-check", action="store_true",
+                        help="키움 연결 테스트(토큰/현재가/잔고). 환경변수 KIWOOM_* 필요")
+    parser.add_argument("--symbol", default="005930", help="연결 테스트 종목코드")
     args = parser.parse_args()
 
     # 실시간 모드는 자체 상태줄만 출력하도록 엔진 INFO 로그를 끈다
-    level = logging.WARNING if args.live else logging.INFO
+    level = logging.WARNING if (args.live or args.kiwoom_check) else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.live:
-        run_live(args.interval, args.ticks, args.state_file)
+    if args.kiwoom_check:
+        try:
+            kiwoom_check(args.symbol, paper=not args.real)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
+    elif args.live:
+        try:
+            run_live(args.interval, args.ticks, args.state_file,
+                     broker_name=args.broker, paper=not args.real)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
     elif args.optimize:
         run_optimize(args.csv, args.tp_grid, args.sl_grid, args.ts_grid,
                      args.objective, args.target, args.qty, args.cash)
